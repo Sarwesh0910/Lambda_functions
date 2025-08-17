@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Exam Result Notification System using SQS, Lambda, and SNS
+
+Parameters:
+  EmailAddress:
+    Type: String
+    Description: Email address to receive exam result notifications
+
+  LambdaTimeout:
+    Type: Number
+    Default: 10
+    Description: Timeout (in seconds) for the Lambda function
+
+  QueueName:
+    Type: String
+    Default: ExamResultQueue
+    Description: Name of the SQS queue
+
+Resources:
+
+  ExamResultQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Ref QueueName
+
+  ExamResultTopic:
+    Type: AWS::SNS::Topic
+
+  ExamResultSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref EmailAddress
+      TopicArn: !Ref ExamResultTopic
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sns:Publish
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  ProcessExamResultsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: !Ref LambdaTimeout
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+
+          sns = boto3.client('sns')
+          def handler(event, context):
+              for record in event['Records']:
+                  message = json.loads(record['body'])
+                  result = f"Student {message['name']} scored {message['score']}."
+                  sns.publish(
+                      TopicArn='{{resolve:topicarn:ExamResultTopic}}',
+                      Message=result,
+                      Subject='Exam Result Notification'
+                  )
+
+  LambdaSQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ExamResultQueue.Arn
+      FunctionName: !Ref ProcessExamResultsFunction
+      BatchSize: 1
+      Enabled: true
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alarm for Lambda function errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ProcessExamResultsFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: []
+
+Outputs:
+  SQSQueueURL:
+    Description: URL of the SQS queue
+    Value: !Ref ExamResultQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueURL"
+
+  SNSTopicARN:
+    Description: ARN of the SNS topic
+    Value: !Ref ExamResultTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-TopicARN"
+
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref ProcessExamResultsFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-LambdaName"
